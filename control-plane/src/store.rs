@@ -74,6 +74,11 @@ impl Store {
         Self { pool }
     }
 
+    pub(crate) async fn ready(&self) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
+    }
+
     pub(crate) async fn upsert_app(&self, app: NewApp) -> Result<AppRecord, sqlx::Error> {
         let sql = format!(
             r#"
