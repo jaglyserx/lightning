@@ -4,16 +4,21 @@ use axum::{
     Json, Router,
     extract::Request,
     extract::{DefaultBodyLimit, Path, State, rejection::JsonRejection},
-    http::StatusCode,
+    http::{
+        StatusCode,
+        header::{AUTHORIZATION, WWW_AUTHENTICATE},
+    },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::Serialize;
-use tracing::warn;
+use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::{
     AppState,
+    auth::PresentedToken,
     deploy::{
         AppSpec, AppStatusResponse, CreateAppRequest, DeployErrorKind, get_app_status_for_app,
     },
@@ -21,19 +26,33 @@ use crate::{
 };
 
 pub(crate) fn router(state: Arc<AppState>) -> Router {
+    let protected = Router::new()
+        .route("/apps", post(create_app))
+        .route("/apps/{name}", get(fetch_app).delete(remove_app))
+        .route("/apps/{name}/status", get(fetch_app_status))
+        .route_layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            require_authentication,
+        ));
+
     Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .nest(
-            "/v1",
-            Router::new()
-                .route("/apps", post(create_app))
-                .route("/apps/{name}", get(fetch_app).delete(remove_app))
-                .route("/apps/{name}/status", get(fetch_app_status)),
-        )
+        .nest("/v1", protected)
         .fallback(route_not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(DefaultBodyLimit::max(64 * 1024))
+        .layer(middleware::from_fn(request_timeout))
+        .with_state(state)
+}
+
+pub(crate) fn admin_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/v1/tokens", post(create_api_token).get(fetch_api_tokens))
+        .route("/v1/tokens/{id}", axum::routing::delete(remove_api_token))
+        .fallback(route_not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+        .layer(DefaultBodyLimit::max(16 * 1024))
         .layer(middleware::from_fn(request_timeout))
         .with_state(state)
 }
@@ -94,6 +113,22 @@ impl ApiError {
         }
     }
 
+    fn unauthorized() -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            code: "unauthorized",
+            message: "a valid bearer token is required".to_string(),
+        }
+    }
+
+    fn authentication_unavailable() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "authentication_unavailable",
+            message: "authentication is temporarily unavailable".to_string(),
+        }
+    }
+
     fn from_json_rejection(rejection: JsonRejection) -> Self {
         let status = rejection.status();
         let code = if status == StatusCode::PAYLOAD_TOO_LARGE {
@@ -149,6 +184,11 @@ struct AppStatusEnvelope {
     deployment: Option<AppStatusResponse>,
 }
 
+#[derive(Deserialize)]
+struct CreateTokenRequest {
+    name: String,
+}
+
 async fn healthz() -> &'static str {
     "OK"
 }
@@ -188,6 +228,101 @@ async fn request_timeout(request: Request, next: Next) -> Response {
     match tokio::time::timeout(Duration::from_secs(30), next.run(request)).await {
         Ok(response) => response,
         Err(_) => ApiError::request_timeout().into_response(),
+    }
+}
+
+async fn require_authentication(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let token = request
+        .headers()
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+
+    let Some(token) = token else {
+        return unauthorized_response();
+    };
+    let Some(token) = PresentedToken::parse(token) else {
+        warn!("api token rejected");
+        return unauthorized_response();
+    };
+
+    match state.store.authenticate_token(&token).await {
+        Ok(Some(token_id)) => {
+            info!(%token_id, "api token authenticated");
+            next.run(request).await
+        }
+        Ok(None) => {
+            warn!("api token rejected");
+            unauthorized_response()
+        }
+        Err(error) => {
+            warn!(error = %error, "api token authentication unavailable");
+            ApiError::authentication_unavailable().into_response()
+        }
+    }
+}
+
+fn unauthorized_response() -> Response {
+    let mut response = ApiError::unauthorized().into_response();
+    response
+        .headers_mut()
+        .insert(WWW_AUTHENTICATE, "Bearer".parse().unwrap());
+    response
+}
+
+async fn create_api_token(
+    State(state): State<Arc<AppState>>,
+    request: Result<Json<CreateTokenRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<crate::auth::CreatedApiToken>), ApiError> {
+    let Json(request) = request.map_err(ApiError::from_json_rejection)?;
+    let name = request.name.trim();
+    if name.is_empty() || name.len() > 100 {
+        return Err(ApiError::bad_request(
+            "token name must contain between 1 and 100 characters",
+        ));
+    }
+
+    let token = state
+        .store
+        .create_token(name)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok((StatusCode::CREATED, Json(token)))
+}
+
+async fn fetch_api_tokens(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<crate::auth::ApiTokenRecord>>, ApiError> {
+    let tokens = state
+        .store
+        .list_tokens()
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?;
+    Ok(Json(tokens))
+}
+
+async fn remove_api_token(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Result<StatusCode, ApiError> {
+    let id = id
+        .parse::<Uuid>()
+        .map_err(|_| ApiError::bad_request("token id must be a UUID"))?;
+    if state
+        .store
+        .revoke_token(id)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+    {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found(format!(
+            "active token `{id}` was not found"
+        )))
     }
 }
 

@@ -29,13 +29,23 @@ async fn main() {
     let config = ControlPlaneConfig::from_env();
     let control_plane = ControlPlane::new(kube, pool, config);
     control_plane.spawn_reconciler();
-    let app = control_plane.router();
+    let public_api = control_plane.router();
+    let admin_api = control_plane.admin_router();
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8000")
+    let public_address = env::var("PUBLIC_API_ADDRESS").unwrap_or_else(|_| "0.0.0.0:8000".into());
+    let admin_address = env::var("ADMIN_API_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8001".into());
+    let public_listener = tokio::net::TcpListener::bind(&public_address)
         .await
-        .expect("failed to bind listener");
-    info!("control plane listening on 0.0.0.0:8000");
-    serve(listener, app)
+        .expect("failed to bind public api listener");
+    let admin_listener = tokio::net::TcpListener::bind(&admin_address)
         .await
-        .expect("control plane server exited unexpectedly");
+        .expect("failed to bind admin api listener");
+    info!(%public_address, "control plane public api listening");
+    info!(%admin_address, "control plane internal admin api listening");
+
+    tokio::try_join!(
+        serve(public_listener, public_api),
+        serve(admin_listener, admin_api)
+    )
+    .expect("control plane server exited unexpectedly");
 }

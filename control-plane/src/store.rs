@@ -7,7 +7,10 @@ use sqlx::{
     },
 };
 
-use crate::deploy::AppSpec;
+use crate::{
+    auth::{ApiTokenRecord, CreatedApiToken, PresentedToken, TokenMaterial},
+    deploy::AppSpec,
+};
 
 #[derive(Clone)]
 pub struct Store {
@@ -77,6 +80,69 @@ impl Store {
     pub(crate) async fn ready(&self) -> Result<(), sqlx::Error> {
         sqlx::query("SELECT 1").execute(&self.pool).await?;
         Ok(())
+    }
+
+    pub(crate) async fn authenticate_token(
+        &self,
+        token: &PresentedToken,
+    ) -> Result<Option<Uuid>, sqlx::Error> {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            UPDATE api_tokens
+            SET last_used_at = now()
+            WHERE token_hash = $1 AND revoked_at IS NULL
+            RETURNING id
+            "#,
+        )
+        .bind(token.hash.as_slice())
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub(crate) async fn create_token(&self, name: &str) -> Result<CreatedApiToken, sqlx::Error> {
+        let material = TokenMaterial::generate();
+        let record = sqlx::query_as::<_, ApiTokenRecord>(
+            r#"
+            INSERT INTO api_tokens (name, token_hash)
+            VALUES ($1, $2)
+            RETURNING id, name, created_at, last_used_at, revoked_at
+            "#,
+        )
+        .bind(name)
+        .bind(material.hash.as_slice())
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(CreatedApiToken {
+            record,
+            token: material.plaintext,
+        })
+    }
+
+    pub(crate) async fn list_tokens(&self) -> Result<Vec<ApiTokenRecord>, sqlx::Error> {
+        sqlx::query_as::<_, ApiTokenRecord>(
+            r#"
+            SELECT id, name, created_at, last_used_at, revoked_at
+            FROM api_tokens
+            ORDER BY created_at DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub(crate) async fn revoke_token(&self, id: Uuid) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE api_tokens
+            SET revoked_at = now()
+            WHERE id = $1 AND revoked_at IS NULL
+            "#,
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     pub(crate) async fn upsert_app(&self, app: NewApp) -> Result<AppRecord, sqlx::Error> {

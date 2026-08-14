@@ -1,4 +1,5 @@
 mod api;
+pub mod auth;
 mod deploy;
 mod reconciler;
 mod store;
@@ -66,6 +67,10 @@ impl ControlPlane {
 
     pub fn router(&self) -> Router {
         api::router(Arc::clone(&self.state))
+    }
+
+    pub fn admin_router(&self) -> Router {
+        api::admin_router(Arc::clone(&self.state))
     }
 
     pub fn spawn_reconciler(&self) -> JoinHandle<()> {
