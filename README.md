@@ -2,6 +2,8 @@
 
 Lightning is a small Rust control plane that reconciles application desired state into Kubernetes resources.
 
+Published images are available from `ghcr.io/jaglyserx/lightning`.
+
 It accepts pre-built container images, persists application and deployment-run state in Postgres, and manages a namespace, Deployment, Service, and Ingress for each application through the Kubernetes API.
 
 ## Repository layout
