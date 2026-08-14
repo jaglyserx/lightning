@@ -8,7 +8,6 @@ FROM chef AS planner
 
 COPY Cargo.toml Cargo.lock ./
 COPY migrations ./migrations
-COPY .sqlx ./.sqlx
 COPY src ./src
 
 RUN cargo chef prepare --recipe-path recipe.json
@@ -23,7 +22,6 @@ FROM chef AS builder
 
 COPY Cargo.toml Cargo.lock ./
 COPY migrations ./migrations
-COPY .sqlx ./.sqlx
 COPY src ./src
 
 ENV SQLX_OFFLINE=true
