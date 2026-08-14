@@ -52,7 +52,7 @@ Requests are limited to 64 KiB and 30 seconds. API errors use a stable envelope:
 }
 ```
 
-The API is not ready for public exposure until namespace ownership and hostname protections are implemented.
+Namespace ownership and derived-hostname protections are enforced by the control plane. Public exposure remains an infrastructure step and should retain bearer authentication, HTTPS, and rate limiting.
 
 ## Repository layout
 

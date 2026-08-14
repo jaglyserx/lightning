@@ -29,6 +29,7 @@ use sqlx::types::Uuid;
 const MANAGER_NAME: &str = "lightning-control-plane";
 const NAMESPACE_PREFIX: &str = "lightning-app-";
 const APP_ID_LABEL: &str = "lightning.joels.computer/app-id";
+const RESERVED_APP_NAMES: &[&str] = &["admin", "api", "control-plane", "lightning", "www"];
 
 #[derive(Debug)]
 pub enum DeployErrorKind {
@@ -67,11 +68,11 @@ impl fmt::Display for DeployError {
 impl std::error::Error for DeployError {}
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateAppRequest {
     pub name: String,
     pub image: String,
     pub port: u16,
-    pub hostname: Option<String>,
     pub replicas: Option<i32>,
 }
 
@@ -122,11 +123,7 @@ impl AppSpec {
             return Err("replicas must be greater than or equal to 1".to_string());
         }
 
-        let hostname = request
-            .hostname
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| format!("{name}.{base_domain}"));
+        let hostname = format!("{name}.{base_domain}");
 
         Ok(Self {
             app_id: None,
@@ -176,6 +173,10 @@ fn validate_name(input: &str) -> Result<String, String> {
 
     if name.starts_with('-') || name.ends_with('-') {
         return Err("name must start and end with an alphanumeric character".to_string());
+    }
+
+    if RESERVED_APP_NAMES.contains(&name.as_str()) {
+        return Err(format!("name `{name}` is reserved"));
     }
 
     Ok(name)
@@ -630,7 +631,6 @@ mod tests {
             name: name.into(),
             image: "example/web:v1".into(),
             port: 8080,
-            hostname: None,
             replicas: None,
         }
     }
@@ -651,6 +651,28 @@ mod tests {
         let error = AppSpec::from_request(request("not_valid"), "apps.joels.computer")
             .expect_err("name should be rejected");
         assert!(error.contains("lowercase letters"));
+    }
+
+    #[test]
+    fn request_rejects_reserved_names() {
+        for name in RESERVED_APP_NAMES {
+            let error = AppSpec::from_request(request(name), "apps.joels.computer")
+                .expect_err("reserved name should be rejected");
+            assert_eq!(error, format!("name `{name}` is reserved"));
+        }
+    }
+
+    #[test]
+    fn request_contract_rejects_custom_hostnames() {
+        let error = serde_json::from_value::<CreateAppRequest>(serde_json::json!({
+            "name": "hello",
+            "image": "example/web:v1",
+            "port": 8080,
+            "hostname": "example.com"
+        }))
+        .expect_err("hostname must not be accepted");
+
+        assert!(error.to_string().contains("unknown field `hostname`"));
     }
 
     #[test]

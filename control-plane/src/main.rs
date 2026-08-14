@@ -26,7 +26,7 @@ async fn main() {
         .await
         .expect("could not connect to database");
 
-    let config = ControlPlaneConfig::from_env();
+    let config = ControlPlaneConfig::from_env().expect("invalid control-plane configuration");
     let control_plane = ControlPlane::new(kube, pool, config);
     control_plane.spawn_reconciler();
     let public_api = control_plane.router();
