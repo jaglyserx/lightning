@@ -1,43 +1,10 @@
-mod api;
-mod deploy;
-mod reconciler;
-mod store;
-
-use std::{env, sync::Arc};
+use std::env;
 
 use axum::serve;
+use control_plane::{ControlPlane, ControlPlaneConfig};
 use kube::Client;
 use sqlx::postgres::PgPoolOptions;
 use tracing::info;
-
-use crate::store::Store;
-
-#[derive(Clone)]
-pub(crate) struct AppState {
-    kube: Client,
-    config: ControlPlaneConfig,
-    store: Store,
-}
-
-#[derive(Clone)]
-pub(crate) struct ControlPlaneConfig {
-    base_domain: String,
-    ingress_class_name: String,
-    cluster_issuer: String,
-}
-
-impl ControlPlaneConfig {
-    fn from_env() -> Self {
-        Self {
-            base_domain: env::var("BASE_DOMAIN")
-                .unwrap_or_else(|_| "apps.joels.computer".to_string()),
-            ingress_class_name: env::var("INGRESS_CLASS_NAME")
-                .unwrap_or_else(|_| "traefik".to_string()),
-            cluster_issuer: env::var("CLUSTER_ISSUER")
-                .unwrap_or_else(|_| "letsencrypt-production".to_string()),
-        }
-    }
-}
 
 #[tokio::main]
 async fn main() {
@@ -59,17 +26,10 @@ async fn main() {
         .await
         .expect("could not connect to database");
 
-    let store = Store::new(pool);
-
     let config = ControlPlaneConfig::from_env();
-    let state = Arc::new(AppState {
-        kube,
-        config,
-        store,
-    });
-
-    tokio::spawn(reconciler::run(Arc::clone(&state)));
-    let app = api::router(state);
+    let control_plane = ControlPlane::new(kube, pool, config);
+    control_plane.spawn_reconciler();
+    let app = control_plane.router();
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8000")
         .await

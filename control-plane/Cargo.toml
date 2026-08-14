@@ -16,3 +16,8 @@ schemars = { version = "1" }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "tls-native-tls", "postgres", "macros", "migrate", "uuid", "chrono"] }
+
+[dev-dependencies]
+http-body-util = "0.1.3"
+tower = { version = "0.5.3", features = ["util"] }
+tower-test = "0.4.0"
