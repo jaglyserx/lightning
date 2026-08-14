@@ -1,0 +1,14 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+control-plane/target/
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Local Codex context
+AGENTS.md
+plan.md
