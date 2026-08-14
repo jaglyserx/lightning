@@ -76,7 +76,8 @@ async fn reconcile_deleted_app(
     app: &AppRecord,
     run: &DeploymentRunRecord,
 ) -> Result<ReconcileOutcome, String> {
-    let status = delete_app_for_app(&state.kube, &app.namespace, &app.name, &app.hostname)
+    let spec = AppSpec::try_from(app).map_err(|err| format!("invalid persisted app: {err}"))?;
+    let status = delete_app_for_app(&state.kube, &spec)
         .await
         .map_err(|err| err.to_string())?;
 
@@ -146,6 +147,7 @@ mod tests {
         };
 
         let spec = AppSpec::try_from(&record).expect("valid app");
+        assert_eq!(spec.app_id, Some(record.id));
         assert_eq!(spec.port, 8080);
         assert_eq!(spec.replicas, 2);
     }

@@ -21,11 +21,14 @@ use k8s_openapi::{
 };
 use kube::{
     Client,
-    api::{Api, DeleteParams, Patch, PatchParams},
+    api::{Api, DeleteParams, Patch, PatchParams, PostParams},
 };
 use serde::{Deserialize, Serialize};
+use sqlx::types::Uuid;
 
 const MANAGER_NAME: &str = "lightning-control-plane";
+const NAMESPACE_PREFIX: &str = "lightning-app-";
+const APP_ID_LABEL: &str = "lightning.joels.computer/app-id";
 
 #[derive(Debug)]
 pub enum DeployErrorKind {
@@ -74,6 +77,7 @@ pub struct CreateAppRequest {
 
 #[derive(Debug, Clone)]
 pub struct AppSpec {
+    pub app_id: Option<Uuid>,
     pub name: String,
     pub namespace: String,
     pub image: String,
@@ -125,7 +129,8 @@ impl AppSpec {
             .unwrap_or_else(|| format!("{name}.{base_domain}"));
 
         Ok(Self {
-            namespace: name.clone(),
+            app_id: None,
+            namespace: format!("{NAMESPACE_PREFIX}{name}"),
             name,
             image,
             port: request.port,
@@ -140,6 +145,7 @@ impl TryFrom<&AppRecord> for AppSpec {
 
     fn try_from(app: &AppRecord) -> Result<Self, Self::Error> {
         Ok(Self {
+            app_id: Some(app.id),
             name: app.name.clone(),
             namespace: app.namespace.clone(),
             image: app.image.clone(),
@@ -156,8 +162,9 @@ fn validate_name(input: &str) -> Result<String, String> {
         return Err("name is required".to_string());
     }
 
-    if name.len() > 63 {
-        return Err("name must be at most 63 characters".to_string());
+    let max_name_length = 63 - NAMESPACE_PREFIX.len();
+    if name.len() > max_name_length {
+        return Err(format!("name must be at most {max_name_length} characters"));
     }
 
     if !name
@@ -175,13 +182,40 @@ fn validate_name(input: &str) -> Result<String, String> {
 }
 
 fn labels_for(app: &AppSpec) -> BTreeMap<String, String> {
-    BTreeMap::from([
+    let mut labels = BTreeMap::from([
         ("app.kubernetes.io/name".to_string(), app.name.clone()),
         (
             "app.kubernetes.io/managed-by".to_string(),
             MANAGER_NAME.to_string(),
         ),
-    ])
+    ]);
+    if let Some(app_id) = app.app_id {
+        labels.insert(APP_ID_LABEL.to_string(), app_id.to_string());
+    }
+    labels
+}
+
+fn verify_namespace_ownership(namespace: &Namespace, app: &AppSpec) -> Result<(), DeployError> {
+    let expected_app_id = app.app_id.ok_or_else(|| {
+        DeployError::unexpected(format!("app `{}` has no persisted identity", app.name))
+    })?;
+    let labels = namespace.metadata.labels.as_ref();
+    let managed_by = labels
+        .and_then(|labels| labels.get("app.kubernetes.io/managed-by"))
+        .map(String::as_str);
+    let owner_id = labels
+        .and_then(|labels| labels.get(APP_ID_LABEL))
+        .map(String::as_str);
+    let expected_app_id = expected_app_id.to_string();
+
+    if managed_by == Some(MANAGER_NAME) && owner_id == Some(expected_app_id.as_str()) {
+        Ok(())
+    } else {
+        Err(DeployError::unexpected(format!(
+            "refusing to mutate namespace `{}` because it is not owned by app `{}` ({expected_app_id})",
+            app.namespace, app.name
+        )))
+    }
 }
 
 fn tls_secret_name(hostname: &str) -> String {
@@ -325,11 +359,33 @@ pub async fn get_app_status_for_app(
 
 pub async fn delete_app_for_app(
     client: &Client,
-    namespace: &str,
-    name: &str,
-    hostname: &str,
+    app: &AppSpec,
 ) -> Result<AppStatusResponse, DeployError> {
     let namespaces: Api<Namespace> = Api::all(client.clone());
+    let namespace = &app.namespace;
+    let name = &app.name;
+    let hostname = &app.hostname;
+
+    let Some(existing) = namespaces.get_opt(namespace).await.map_err(|err| {
+        DeployError::unexpected(format!("failed to inspect namespace `{namespace}`: {err}"))
+    })?
+    else {
+        return Ok(AppStatusResponse {
+            name: name.to_string(),
+            namespace: namespace.to_string(),
+            hostname: hostname.to_string(),
+            url: format!("https://{hostname}"),
+            image: None,
+            replicas: 0,
+            updated_replicas: 0,
+            ready_replicas: 0,
+            available_replicas: 0,
+            unavailable_replicas: 0,
+            status: "deleted".to_string(),
+            message: "namespace is absent".to_string(),
+        });
+    };
+    verify_namespace_ownership(&existing, app)?;
 
     match namespaces.delete(namespace, &DeleteParams::default()).await {
         Ok(_) => Ok(AppStatusResponse {
@@ -383,15 +439,36 @@ async fn apply_resources(
     let service = build_service(app);
     let ingress = build_ingress(app, config);
 
-    namespaces
-        .patch(&app.namespace, &patch_params, &Patch::Apply(&namespace))
-        .await
-        .map_err(|err| {
-            DeployError::unexpected(format!(
-                "failed to apply namespace `{}`: {err}",
-                app.namespace
-            ))
-        })?;
+    match namespaces.get_opt(&app.namespace).await.map_err(|err| {
+        DeployError::unexpected(format!(
+            "failed to inspect namespace `{}`: {err}",
+            app.namespace
+        ))
+    })? {
+        Some(existing) => {
+            verify_namespace_ownership(&existing, app)?;
+            namespaces
+                .patch(&app.namespace, &patch_params, &Patch::Apply(&namespace))
+                .await
+                .map_err(|err| {
+                    DeployError::unexpected(format!(
+                        "failed to apply namespace `{}`: {err}",
+                        app.namespace
+                    ))
+                })?;
+        }
+        None => {
+            namespaces
+                .create(&PostParams::default(), &namespace)
+                .await
+                .map_err(|err| {
+                    DeployError::unexpected(format!(
+                        "failed to create namespace `{}`: {err}",
+                        app.namespace
+                    ))
+                })?;
+        }
+    }
 
     deployments
         .patch(&app.name, &patch_params, &Patch::Apply(&deployment))
@@ -564,7 +641,7 @@ mod tests {
             .expect("request should be valid");
 
         assert_eq!(app.name, "hello");
-        assert_eq!(app.namespace, "hello");
+        assert_eq!(app.namespace, "lightning-app-hello");
         assert_eq!(app.hostname, "hello.apps.joels.computer");
         assert_eq!(app.replicas, 1);
     }
@@ -574,6 +651,55 @@ mod tests {
         let error = AppSpec::from_request(request("not_valid"), "apps.joels.computer")
             .expect_err("name should be rejected");
         assert!(error.contains("lowercase letters"));
+    }
+
+    #[test]
+    fn request_name_must_fit_the_prefixed_namespace() {
+        let error = AppSpec::from_request(
+            request("this-name-is-fifty-characters-long-and-will-not-fit-x"),
+            "apps.joels.computer",
+        )
+        .expect_err("name should be rejected");
+
+        assert!(error.contains("at most 49 characters"));
+    }
+
+    #[test]
+    fn namespace_ownership_requires_the_persisted_app_identity() {
+        let mut app = AppSpec::from_request(request("hello"), "apps.joels.computer")
+            .expect("request should be valid");
+        let app_id = Uuid::new_v4();
+        app.app_id = Some(app_id);
+
+        let namespace = build_namespace(&app);
+        verify_namespace_ownership(&namespace, &app).expect("namespace should be owned");
+
+        let mut unowned = namespace;
+        unowned
+            .metadata
+            .labels
+            .as_mut()
+            .expect("labels")
+            .remove(APP_ID_LABEL);
+        let error = verify_namespace_ownership(&unowned, &app)
+            .expect_err("namespace without app identity must be rejected");
+        assert!(error.to_string().contains("refusing to mutate namespace"));
+    }
+
+    #[test]
+    fn namespace_owned_by_another_app_is_rejected() {
+        let mut app = AppSpec::from_request(request("hello"), "apps.joels.computer")
+            .expect("request should be valid");
+        app.app_id = Some(Uuid::new_v4());
+        let mut namespace = build_namespace(&app);
+        namespace
+            .metadata
+            .labels
+            .as_mut()
+            .expect("labels")
+            .insert(APP_ID_LABEL.to_string(), Uuid::new_v4().to_string());
+
+        assert!(verify_namespace_ownership(&namespace, &app).is_err());
     }
 
     #[test]
