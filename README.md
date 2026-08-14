@@ -17,6 +17,8 @@ GET    /v1/apps/{name}/status
 DELETE /v1/apps/{name}
 ```
 
+The public API is described by [the OpenAPI 3.1 document](openapi/openapi.yaml). The internal token-administration listener is intentionally excluded from that public contract.
+
 Clients authenticate with an opaque bearer token:
 
 ```http
@@ -59,7 +61,7 @@ Namespace ownership and derived-hostname protections are enforced by the control
 ```text
 control-plane/  Rust API, persistence, migrations, and reconciler
 sdk/python/     Python SDK (planned)
-openapi/        Public API contract (planned)
+openapi/        Public OpenAPI contract
 ```
 
 Cluster provisioning and environment-specific deployment live in the separate private `lightning-infra` repository.

@@ -1,0 +1,442 @@
+openapi: 3.1.0
+info:
+  title: Lightning API
+  version: 1.0.0
+  description: |
+    Manage pre-built container applications through the Lightning control plane.
+    Application endpoints require an opaque bearer token. Kubernetes credentials
+    are never accepted from clients.
+tags:
+  - name: Operations
+  - name: Applications
+paths:
+  /healthz:
+    get:
+      tags: [Operations]
+      operationId: getHealth
+      summary: Check process liveness
+      responses:
+        "200":
+          description: The control-plane process is alive.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: OK
+  /readyz:
+    get:
+      tags: [Operations]
+      operationId: getReadiness
+      summary: Check dependency readiness
+      description: Reports ready only when Postgres and the Kubernetes API are reachable.
+      responses:
+        "200":
+          description: All required dependencies are reachable.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: OK
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /v1/apps:
+    post:
+      tags: [Applications]
+      operationId: applyApp
+      summary: Create or update an application
+      description: |
+        Stores the desired application state and queues reconciliation. Reusing an
+        existing name updates that application. Namespace and hostname are derived
+        by the control plane and cannot be supplied by the caller.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApplyAppRequest"
+      responses:
+        "202":
+          description: Desired state was accepted and reconciliation was queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "422":
+          $ref: "#/components/responses/InvalidJson"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AuthenticationUnavailable"
+  /v1/apps/{name}:
+    parameters:
+      - $ref: "#/components/parameters/AppName"
+    get:
+      tags: [Applications]
+      operationId: getApp
+      summary: Get an application and its latest reconciliation
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: The persisted application was found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AuthenticationUnavailable"
+    delete:
+      tags: [Applications]
+      operationId: deleteApp
+      summary: Delete an application
+      description: Marks the application deleted and queues owned-resource removal.
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          description: Deletion was accepted and reconciliation was queued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AuthenticationUnavailable"
+  /v1/apps/{name}/status:
+    parameters:
+      - $ref: "#/components/parameters/AppName"
+    get:
+      tags: [Applications]
+      operationId: getAppStatus
+      summary: Get desired state and live rollout status
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Persisted, reconciliation, and Kubernetes rollout state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "408":
+          $ref: "#/components/responses/RequestTimeout"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/AuthenticationUnavailable"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: ltn_<secret>
+      description: Opaque revocable token created through the internal administrative API.
+  parameters:
+    AppName:
+      name: name
+      in: path
+      required: true
+      description: Canonical lowercase application name.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 49
+        pattern: "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
+  responses:
+    BadRequest:
+      description: The application specification is invalid.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    Unauthorized:
+      description: A valid bearer token was not provided.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            const: Bearer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: The requested application was not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    RequestTimeout:
+      description: Request processing exceeded 30 seconds.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    PayloadTooLarge:
+      description: The request exceeded the 64 KiB public API limit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InvalidJson:
+      description: The JSON body is malformed or does not match the request schema.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalError:
+      description: The control plane could not complete the request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ServiceUnavailable:
+      description: A required dependency is unavailable.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    AuthenticationUnavailable:
+      description: Token authentication could not reach its persistence layer.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    ApplyAppRequest:
+      type: object
+      additionalProperties: false
+      required: [name, image, port]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 49
+          description: |
+            Application name. It is trimmed and normalized to lowercase. DNS-compatible
+            letters, numbers, and internal hyphens are accepted. Reserved names are rejected.
+        image:
+          type: string
+          minLength: 1
+          description: Pre-built container image reference.
+          examples: ["ghcr.io/example/web:sha-0123456"]
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          description: Container port exposed by the application.
+        replicas:
+          type: integer
+          minimum: 1
+          default: 1
+    App:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - namespace
+        - image
+        - port
+        - hostname
+        - replicas
+        - desired_state
+        - generation
+        - reconciled_generation
+        - last_reconciled_at
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        namespace:
+          type: string
+          description: Derived as `lightning-app-{name}`.
+        image:
+          type: string
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        hostname:
+          type: string
+          format: hostname
+          description: Derived as `{name}.apps.joels.computer`.
+        replicas:
+          type: integer
+          minimum: 1
+        desired_state:
+          type: string
+          enum: [active, deleted]
+        generation:
+          type: integer
+          format: int64
+        reconciled_generation:
+          type: integer
+          format: int64
+        last_reconciled_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    DeploymentRun:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - app_id
+        - trigger_kind
+        - status
+        - status_message
+        - started_at
+        - finished_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        app_id:
+          type: string
+          format: uuid
+        trigger_kind:
+          type: string
+          enum: [api, reconciler]
+        status:
+          type: string
+          enum: [pending, running, succeeded, failed]
+        status_message:
+          oneOf:
+            - type: string
+            - type: "null"
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          oneOf:
+            - type: string
+              format: date-time
+            - type: "null"
+    AppResponse:
+      type: object
+      additionalProperties: false
+      required: [app, deployment]
+      properties:
+        app:
+          $ref: "#/components/schemas/App"
+        deployment:
+          oneOf:
+            - $ref: "#/components/schemas/DeploymentRun"
+            - type: "null"
+    KubernetesAppStatus:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - namespace
+        - hostname
+        - url
+        - image
+        - replicas
+        - updated_replicas
+        - ready_replicas
+        - available_replicas
+        - unavailable_replicas
+        - status
+        - message
+      properties:
+        name:
+          type: string
+        namespace:
+          type: string
+        hostname:
+          type: string
+          format: hostname
+        url:
+          type: string
+          format: uri
+        image:
+          oneOf:
+            - type: string
+            - type: "null"
+        replicas:
+          type: integer
+        updated_replicas:
+          type: integer
+        ready_replicas:
+          type: integer
+        available_replicas:
+          type: integer
+        unavailable_replicas:
+          type: integer
+        status:
+          type: string
+          enum: [ready, warning]
+        message:
+          type: string
+    AppStatusResponse:
+      type: object
+      additionalProperties: false
+      required: [app, reconciliation, deployment]
+      properties:
+        app:
+          $ref: "#/components/schemas/App"
+        reconciliation:
+          oneOf:
+            - $ref: "#/components/schemas/DeploymentRun"
+            - type: "null"
+        deployment:
+          oneOf:
+            - $ref: "#/components/schemas/KubernetesAppStatus"
+            - type: "null"
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              examples: [bad_request]
+            message:
+              type: string
